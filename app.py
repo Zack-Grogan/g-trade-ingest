@@ -1,6 +1,6 @@
 """
-g-trade-ingest: G-Trade ingest service; receive state/events/trades from Mac bridge; write to Postgres.
-Auth: Bearer INGEST_API_KEY.
+g-trade-ingest: G-Trade ingest service; receive observability streams from Mac bridge; write to Postgres.
+Auth: Bearer GTRADE_INTERNAL_API_TOKEN or INGEST_API_KEY.
 """
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ import uvicorn
 logger = logging.getLogger(__name__)
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
+INTERNAL_API_TOKEN = (os.environ.get("GTRADE_INTERNAL_API_TOKEN") or "").strip()
 INGEST_API_KEY = os.environ.get("INGEST_API_KEY", "")
 
 _pool: ThreadedConnectionPool | None = None
@@ -83,6 +84,10 @@ def _extract_state_fields(body: dict[str, Any]) -> dict[str, Any]:
         "last_entry_reason": body.get("last_entry_reason") or alpha.get("last_entry_reason"),
         "last_entry_block_reason": execution.get("last_entry_block_reason") or body.get("last_entry_block_reason"),
         "decision_price": execution.get("decision_price"),
+        "decision_id": execution.get("decision_id") or body.get("decision_id"),
+        "attempt_id": execution.get("attempt_id") or body.get("attempt_id"),
+        "position_id": execution.get("position_id") or body.get("position_id"),
+        "trade_id": execution.get("trade_id") or body.get("trade_id"),
         "entry_guard_json": Json(execution.get("entry_guard")) if execution.get("entry_guard") is not None else None,
         "unresolved_entry_json": Json(execution.get("unresolved_entry")) if execution.get("unresolved_entry") is not None else None,
         "execution_json": Json(execution) if execution else None,
@@ -151,11 +156,11 @@ app = FastAPI(title="g-trade-ingest", lifespan=lifespan)
 
 
 def _bearer_ok(authorization: str | None) -> bool:
-    if not INGEST_API_KEY:
-        return False
     if not authorization or not authorization.startswith("Bearer "):
         return False
-    return authorization[7:].strip() == INGEST_API_KEY.strip()
+    token = authorization[7:].strip()
+    allowed = [candidate for candidate in (INTERNAL_API_TOKEN, INGEST_API_KEY.strip()) if candidate]
+    return bool(allowed) and token in allowed
 
 
 @app.post("/ingest/state")
@@ -178,10 +183,10 @@ async def ingest_state(
             INSERT INTO state_snapshots (
                 run_id, captured_at, status, data_mode, symbol, zone, zone_state, position, position_pnl,
                 daily_pnl, risk_state, last_signal_json, last_entry_reason, last_entry_block_reason, decision_price,
-                entry_guard_json, unresolved_entry_json, execution_json, heartbeat_json, lifecycle_json,
-                observability_json, payload_json
+                decision_id, attempt_id, position_id, trade_id, entry_guard_json, unresolved_entry_json,
+                execution_json, heartbeat_json, lifecycle_json, observability_json, payload_json
             ) VALUES (
-                %s, NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                %s, NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
             )
             """,
             (
@@ -199,6 +204,10 @@ async def ingest_state(
                 state_fields["last_entry_reason"],
                 state_fields["last_entry_block_reason"],
                 state_fields["decision_price"],
+                state_fields["decision_id"],
+                state_fields["attempt_id"],
+                state_fields["position_id"],
+                state_fields["trade_id"],
                 state_fields["entry_guard_json"],
                 state_fields["unresolved_entry_json"],
                 state_fields["execution_json"],
@@ -329,6 +338,72 @@ async def ingest_events(
     return {"ok": True, "inserted": len(events)}
 
 
+@app.post("/ingest/state-snapshots")
+async def ingest_state_snapshots(
+    request: Request,
+    authorization: str | None = Header(None),
+):
+    if not _bearer_ok(authorization):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing Bearer token")
+    body = await request.json()
+    rows = list(body.get("state_snapshots", [])) if isinstance(body, dict) else []
+    if not rows:
+        return {"ok": True, "inserted": 0}
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        for row in rows:
+            item = row if isinstance(row, dict) else {}
+            cur.execute(
+                """
+                INSERT INTO state_snapshots (
+                    run_id, captured_at, status, data_mode, symbol, zone, zone_state, position, position_pnl,
+                    daily_pnl, risk_state, last_signal_json, last_entry_reason, last_entry_block_reason, decision_price,
+                    decision_id, attempt_id, position_id, trade_id, entry_guard_json, unresolved_entry_json,
+                    execution_json, heartbeat_json, lifecycle_json, observability_json, payload_json
+                ) VALUES (
+                    %s, COALESCE(%s, NOW()), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                )
+                """,
+                (
+                    item.get("run_id") or _extract_run_id(item),
+                    item.get("captured_at") or item.get("decided_at") or item.get("observed_at"),
+                    item.get("status"),
+                    item.get("data_mode"),
+                    item.get("symbol"),
+                    item.get("zone"),
+                    item.get("zone_state"),
+                    item.get("position"),
+                    item.get("position_pnl"),
+                    item.get("daily_pnl"),
+                    item.get("risk_state"),
+                    Json(item.get("last_signal") if item.get("last_signal") is not None else item.get("last_signal_json") or {}),
+                    item.get("last_entry_reason"),
+                    item.get("last_entry_block_reason"),
+                    item.get("decision_price"),
+                    item.get("decision_id"),
+                    item.get("attempt_id"),
+                    item.get("position_id"),
+                    item.get("trade_id"),
+                    Json(item.get("entry_guard") if item.get("entry_guard") is not None else item.get("entry_guard_json") or {}),
+                    Json(item.get("unresolved_entry") if item.get("unresolved_entry") is not None else item.get("unresolved_entry_json") or {}),
+                    Json(item.get("execution") if item.get("execution") is not None else item.get("execution_json") or {}),
+                    Json(item.get("heartbeat") if item.get("heartbeat") is not None else item.get("heartbeat_json") or {}),
+                    Json(item.get("lifecycle") if item.get("lifecycle") is not None else item.get("lifecycle_json") or {}),
+                    Json(item.get("observability") if item.get("observability") is not None else item.get("observability_json") or {}),
+                    Json(item),
+                ),
+            )
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        logger.exception("ingest_state_snapshots failed")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+    finally:
+        put_conn(conn)
+    return {"ok": True, "inserted": len(rows)}
+
+
 @app.post("/ingest/trades")
 async def ingest_trades(
     request: Request,
@@ -350,9 +425,9 @@ async def ingest_trades(
             cur.execute(
                 """INSERT INTO completed_trades (
                        run_id, entry_time, exit_time, direction, contracts, entry_price, exit_price, pnl, zone, strategy,
-                       regime, event_tags_json, source, backfilled, payload_json
+                       regime, event_tags_json, source, backfilled, trade_id, position_id, decision_id, attempt_id, payload_json
                    )
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                 (
                     row.get("run_id", ""),
                     row.get("entry_time"),
@@ -368,6 +443,10 @@ async def ingest_trades(
                     Json(row.get("event_tags") if "event_tags" in row else row.get("event_tags_json") or []),
                     row.get("source", "ingest"),
                     bool(row.get("backfilled", False)),
+                    row.get("trade_id"),
+                    row.get("position_id"),
+                    row.get("decision_id"),
+                    row.get("attempt_id"),
                     Json(row),
                 ),
             )
@@ -379,6 +458,213 @@ async def ingest_trades(
     finally:
         put_conn(conn)
     return {"ok": True, "inserted": len(trades)}
+
+
+@app.post("/ingest/market-tape")
+async def ingest_market_tape(
+    request: Request,
+    authorization: str | None = Header(None),
+):
+    if not _bearer_ok(authorization):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing Bearer token")
+    body = await request.json()
+    rows = list(body.get("market_tape", [])) if isinstance(body, dict) else []
+    if not rows:
+        return {"ok": True, "inserted": 0}
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        for row in rows:
+            item = row if isinstance(row, dict) else {}
+            cur.execute(
+                """
+                INSERT INTO market_tape (
+                    captured_at, inserted_at, run_id, process_id, symbol, contract_id, bid, ask, last, volume,
+                    bid_size, ask_size, last_size, volume_is_cumulative, quote_is_synthetic, trade_side, latency_ms,
+                    source, sequence, payload_json
+                ) VALUES (
+                    COALESCE(%s, NOW()), COALESCE(%s, NOW()), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                )
+                """,
+                (
+                    item.get("captured_at") or item.get("event_time") or item.get("timestamp"),
+                    item.get("inserted_at"),
+                    item.get("run_id") or _extract_run_id(item),
+                    item.get("process_id"),
+                    item.get("symbol"),
+                    item.get("contract_id"),
+                    item.get("bid"),
+                    item.get("ask"),
+                    item.get("last"),
+                    item.get("volume"),
+                    item.get("bid_size"),
+                    item.get("ask_size"),
+                    item.get("last_size"),
+                    item.get("volume_is_cumulative"),
+                    item.get("quote_is_synthetic"),
+                    item.get("trade_side"),
+                    item.get("latency_ms"),
+                    item.get("source"),
+                    item.get("sequence"),
+                    Json(item),
+                ),
+            )
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        logger.exception("ingest_market_tape failed")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+    finally:
+        put_conn(conn)
+    return {"ok": True, "inserted": len(rows)}
+
+
+@app.post("/ingest/decision-snapshots")
+async def ingest_decision_snapshots(
+    request: Request,
+    authorization: str | None = Header(None),
+):
+    if not _bearer_ok(authorization):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing Bearer token")
+    body = await request.json()
+    rows = list(body.get("decision_snapshots", [])) if isinstance(body, dict) else []
+    if not rows:
+        return {"ok": True, "inserted": 0}
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        for row in rows:
+            item = row if isinstance(row, dict) else {}
+            cur.execute(
+                """
+                INSERT INTO decision_snapshots (
+                    decided_at, inserted_at, run_id, process_id, decision_id, attempt_id, symbol, zone, action, reason,
+                    outcome, outcome_reason, long_score, short_score, flat_bias, score_gap, dominant_side, current_price,
+                    allow_entries, execution_tradeable, contracts, order_type, limit_price, decision_price, side,
+                    stop_loss, take_profit, max_hold_minutes, regime_state, regime_reason, active_session,
+                    active_vetoes_json, feature_snapshot_json, entry_guard_json, unresolved_entry_json, event_context_json,
+                    order_flow_json, payload_json
+                ) VALUES (
+                    COALESCE(%s, NOW()), COALESCE(%s, NOW()), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                )
+                """,
+                (
+                    item.get("decided_at") or item.get("event_time") or item.get("timestamp"),
+                    item.get("inserted_at"),
+                    item.get("run_id") or _extract_run_id(item),
+                    item.get("process_id"),
+                    item.get("decision_id"),
+                    item.get("attempt_id"),
+                    item.get("symbol"),
+                    item.get("zone"),
+                    item.get("action"),
+                    item.get("reason"),
+                    item.get("outcome"),
+                    item.get("outcome_reason"),
+                    item.get("long_score"),
+                    item.get("short_score"),
+                    item.get("flat_bias"),
+                    item.get("score_gap"),
+                    item.get("dominant_side"),
+                    item.get("current_price"),
+                    item.get("allow_entries"),
+                    item.get("execution_tradeable"),
+                    item.get("contracts"),
+                    item.get("order_type"),
+                    item.get("limit_price"),
+                    item.get("decision_price"),
+                    item.get("side"),
+                    item.get("stop_loss"),
+                    item.get("take_profit"),
+                    item.get("max_hold_minutes"),
+                    item.get("regime_state"),
+                    item.get("regime_reason"),
+                    item.get("active_session"),
+                    Json(item.get("active_vetoes") if item.get("active_vetoes") is not None else item.get("active_vetoes_json") or []),
+                    Json(item.get("feature_snapshot") if item.get("feature_snapshot") is not None else item.get("feature_snapshot_json") or {}),
+                    Json(item.get("entry_guard") if item.get("entry_guard") is not None else item.get("entry_guard_json") or {}),
+                    Json(item.get("unresolved_entry") if item.get("unresolved_entry") is not None else item.get("unresolved_entry_json") or {}),
+                    Json(item.get("event_context") if item.get("event_context") is not None else item.get("event_context_json") or {}),
+                    Json(item.get("order_flow") if item.get("order_flow") is not None else item.get("order_flow_json") or {}),
+                    Json(item),
+                ),
+            )
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        logger.exception("ingest_decision_snapshots failed")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+    finally:
+        put_conn(conn)
+    return {"ok": True, "inserted": len(rows)}
+
+
+@app.post("/ingest/order-lifecycle")
+async def ingest_order_lifecycle(
+    request: Request,
+    authorization: str | None = Header(None),
+):
+    if not _bearer_ok(authorization):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing Bearer token")
+    body = await request.json()
+    rows = list(body.get("order_lifecycle", [])) if isinstance(body, dict) else []
+    if not rows:
+        return {"ok": True, "inserted": 0}
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        for row in rows:
+            item = row if isinstance(row, dict) else {}
+            cur.execute(
+                """
+                INSERT INTO order_lifecycle (
+                    observed_at, inserted_at, run_id, process_id, decision_id, attempt_id, order_id, position_id,
+                    trade_id, symbol, event_type, status, side, role, is_protective, order_type, quantity, contracts,
+                    limit_price, stop_price, expected_fill_price, filled_price, filled_quantity, remaining_quantity,
+                    zone, reason, lifecycle_state, payload_json
+                ) VALUES (
+                    COALESCE(%s, NOW()), COALESCE(%s, NOW()), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                )
+                """,
+                (
+                    item.get("observed_at") or item.get("event_time") or item.get("timestamp"),
+                    item.get("inserted_at"),
+                    item.get("run_id") or _extract_run_id(item),
+                    item.get("process_id"),
+                    item.get("decision_id"),
+                    item.get("attempt_id"),
+                    item.get("order_id"),
+                    item.get("position_id"),
+                    item.get("trade_id"),
+                    item.get("symbol"),
+                    item.get("event_type"),
+                    item.get("status"),
+                    item.get("side"),
+                    item.get("role"),
+                    item.get("is_protective"),
+                    item.get("order_type"),
+                    item.get("quantity"),
+                    item.get("contracts"),
+                    item.get("limit_price"),
+                    item.get("stop_price"),
+                    item.get("expected_fill_price"),
+                    item.get("filled_price"),
+                    item.get("filled_quantity"),
+                    item.get("remaining_quantity"),
+                    item.get("zone"),
+                    item.get("reason"),
+                    item.get("lifecycle_state"),
+                    Json(item),
+                ),
+            )
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        logger.exception("ingest_order_lifecycle failed")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+    finally:
+        put_conn(conn)
+    return {"ok": True, "inserted": len(rows)}
 
 
 @app.post("/ingest/run-manifest")
@@ -481,28 +767,32 @@ async def ingest_bridge_health(
     if not _bearer_ok(authorization):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing Bearer token")
     body = await request.json()
-    if not isinstance(body, dict):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="JSON object required")
-    run_id = _extract_run_id(body)
+    rows = list(body.get("bridge_health", [])) if isinstance(body, dict) and "bridge_health" in body else ([body] if isinstance(body, dict) else [])
+    if not rows:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="JSON object or batch required")
     conn = get_conn()
     try:
         cur = conn.cursor()
-        cur.execute(
-            """
-            INSERT INTO bridge_ingest_health (
-                run_id, observed_at, bridge_status, queue_depth, last_flush_at, last_success_at, last_error, payload_json
-            ) VALUES (%s, NOW(), %s, %s, %s, %s, %s, %s)
-            """,
-            (
-                run_id if run_id != "unknown" else None,
-                body.get("bridge_status") or body.get("status"),
-                body.get("queue_depth"),
-                body.get("last_flush_at"),
-                body.get("last_success_at"),
-                body.get("last_error"),
-                Json(body),
-            ),
-        )
+        for row in rows:
+            item = row if isinstance(row, dict) else {}
+            run_id = _extract_run_id(item)
+            cur.execute(
+                """
+                INSERT INTO bridge_ingest_health (
+                    run_id, observed_at, bridge_status, queue_depth, last_flush_at, last_success_at, last_error, payload_json
+                ) VALUES (%s, COALESCE(%s, NOW()), %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    run_id if run_id != "unknown" else None,
+                    item.get("observed_at"),
+                    item.get("bridge_status") or item.get("status"),
+                    item.get("queue_depth"),
+                    item.get("last_flush_at"),
+                    item.get("last_success_at"),
+                    item.get("last_error"),
+                    Json(item),
+                ),
+            )
         conn.commit()
     except Exception as e:
         conn.rollback()
@@ -510,7 +800,56 @@ async def ingest_bridge_health(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
     finally:
         put_conn(conn)
-    return {"ok": True, "run_id": run_id}
+    return {"ok": True, "inserted": len(rows)}
+
+
+@app.post("/ingest/runtime-logs")
+async def ingest_runtime_logs(
+    request: Request,
+    authorization: str | None = Header(None),
+):
+    if not _bearer_ok(authorization):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing Bearer token")
+    body = await request.json()
+    rows = list(body.get("runtime_logs", [])) if isinstance(body, dict) else []
+    if not rows:
+        return {"ok": True, "inserted": 0}
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        for row in rows:
+            item = row if isinstance(row, dict) else {}
+            cur.execute(
+                """
+                INSERT INTO runtime_logs (
+                    run_id, logged_at, inserted_at, level, logger_name, source, service_name, process_id, line_hash,
+                    message, payload_json
+                ) VALUES (
+                    %s, COALESCE(%s, NOW()), COALESCE(%s, NOW()), %s, %s, %s, %s, %s, %s, %s, %s
+                )
+                """,
+                (
+                    item.get("run_id") or _extract_run_id(item),
+                    item.get("logged_at") or item.get("observed_at"),
+                    item.get("inserted_at"),
+                    item.get("level") or item.get("level_name"),
+                    item.get("logger_name"),
+                    item.get("source"),
+                    item.get("service_name"),
+                    item.get("process_id"),
+                    item.get("line_hash"),
+                    item.get("message"),
+                    Json(item),
+                ),
+            )
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        logger.exception("ingest_runtime_logs failed")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+    finally:
+        put_conn(conn)
+    return {"ok": True, "inserted": len(rows)}
 
 
 @app.get("/health")
