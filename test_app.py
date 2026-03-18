@@ -41,7 +41,6 @@ def test_runtime_logs_accept_internal_token(monkeypatch):
     fake_conn = _FakeConn()
     monkeypatch.setattr(ingest_app, "ensure_schema", lambda: None)
     monkeypatch.setattr(ingest_app, "INTERNAL_API_TOKEN", "internal-token")
-    monkeypatch.setattr(ingest_app, "INGEST_API_KEY", "")
     monkeypatch.setattr(ingest_app, "get_conn", lambda: fake_conn)
     monkeypatch.setattr(ingest_app, "put_conn", lambda conn: None)
 
@@ -61,9 +60,22 @@ def test_runtime_logs_accept_internal_token(monkeypatch):
 def test_runtime_logs_reject_missing_auth(monkeypatch):
     monkeypatch.setattr(ingest_app, "ensure_schema", lambda: None)
     monkeypatch.setattr(ingest_app, "INTERNAL_API_TOKEN", "internal-token")
-    monkeypatch.setattr(ingest_app, "INGEST_API_KEY", "")
 
     with TestClient(ingest_app.app) as client:
         response = client.post("/ingest/runtime-logs", json={"runtime_logs": [{"message": "x"}]})
+
+    assert response.status_code == 401
+
+
+def test_runtime_logs_reject_legacy_ingest_key(monkeypatch):
+    monkeypatch.setattr(ingest_app, "ensure_schema", lambda: None)
+    monkeypatch.setattr(ingest_app, "INTERNAL_API_TOKEN", "internal-token")
+
+    with TestClient(ingest_app.app) as client:
+        response = client.post(
+            "/ingest/runtime-logs",
+            headers={"Authorization": "Bearer legacy-ingest-key"},
+            json={"runtime_logs": [{"message": "x"}]},
+        )
 
     assert response.status_code == 401

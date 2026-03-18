@@ -1,6 +1,6 @@
 """
 g-trade-ingest: G-Trade ingest service; receive observability streams from Mac bridge; write to Postgres.
-Auth: Bearer GTRADE_INTERNAL_API_TOKEN or INGEST_API_KEY.
+Auth: Bearer GTRADE_INTERNAL_API_TOKEN.
 """
 from __future__ import annotations
 
@@ -19,7 +19,6 @@ logger = logging.getLogger(__name__)
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 INTERNAL_API_TOKEN = (os.environ.get("GTRADE_INTERNAL_API_TOKEN") or "").strip()
-INGEST_API_KEY = os.environ.get("INGEST_API_KEY", "")
 
 _pool: ThreadedConnectionPool | None = None
 
@@ -159,8 +158,7 @@ def _bearer_ok(authorization: str | None) -> bool:
     if not authorization or not authorization.startswith("Bearer "):
         return False
     token = authorization[7:].strip()
-    allowed = [candidate for candidate in (INTERNAL_API_TOKEN, INGEST_API_KEY.strip()) if candidate]
-    return bool(allowed) and token in allowed
+    return bool(INTERNAL_API_TOKEN) and token == INTERNAL_API_TOKEN
 
 
 @app.post("/ingest/state")
