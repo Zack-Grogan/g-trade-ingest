@@ -259,6 +259,29 @@ def ensure_schema() -> None:
         )
         cur.execute(
             """
+            ALTER TABLE IF EXISTS run_manifests
+                ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ,
+                ADD COLUMN IF NOT EXISTS process_id INT,
+                ADD COLUMN IF NOT EXISTS data_mode TEXT,
+                ADD COLUMN IF NOT EXISTS symbol TEXT,
+                ADD COLUMN IF NOT EXISTS account_id TEXT,
+                ADD COLUMN IF NOT EXISTS account_name TEXT,
+                ADD COLUMN IF NOT EXISTS account_mode TEXT,
+                ADD COLUMN IF NOT EXISTS account_is_practice BOOLEAN,
+                ADD COLUMN IF NOT EXISTS config_path TEXT,
+                ADD COLUMN IF NOT EXISTS config_hash TEXT,
+                ADD COLUMN IF NOT EXISTS log_path TEXT,
+                ADD COLUMN IF NOT EXISTS sqlite_path TEXT,
+                ADD COLUMN IF NOT EXISTS git_commit TEXT,
+                ADD COLUMN IF NOT EXISTS git_branch TEXT,
+                ADD COLUMN IF NOT EXISTS git_dirty BOOLEAN,
+                ADD COLUMN IF NOT EXISTS git_available BOOLEAN,
+                ADD COLUMN IF NOT EXISTS app_version TEXT,
+                ADD COLUMN IF NOT EXISTS payload_json JSONB;
+            """
+        )
+        cur.execute(
+            """
             CREATE TABLE IF NOT EXISTS run_manifests (
                 run_id TEXT PRIMARY KEY,
                 created_at TIMESTAMPTZ NOT NULL,
