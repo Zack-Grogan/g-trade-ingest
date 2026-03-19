@@ -170,8 +170,147 @@ def ensure_schema() -> None:
         return
     conn = get_conn()
     try:
+        cur = conn.cursor()
+        # Older production databases already have the base tables, but not the
+        # newer account-aware columns/tables. Apply those pieces explicitly
+        # before the bulk schema so a legacy Postgres schema does not abort on
+        # the first account_id index.
+        cur.execute(
+            """
+            ALTER TABLE IF EXISTS runs
+                ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ,
+                ADD COLUMN IF NOT EXISTS status TEXT,
+                ADD COLUMN IF NOT EXISTS zone TEXT,
+                ADD COLUMN IF NOT EXISTS zone_state TEXT,
+                ADD COLUMN IF NOT EXISTS position INTEGER,
+                ADD COLUMN IF NOT EXISTS position_pnl DOUBLE PRECISION,
+                ADD COLUMN IF NOT EXISTS daily_pnl DOUBLE PRECISION,
+                ADD COLUMN IF NOT EXISTS risk_state TEXT,
+                ADD COLUMN IF NOT EXISTS account_id TEXT,
+                ADD COLUMN IF NOT EXISTS account_name TEXT,
+                ADD COLUMN IF NOT EXISTS account_mode TEXT,
+                ADD COLUMN IF NOT EXISTS account_is_practice BOOLEAN,
+                ADD COLUMN IF NOT EXISTS last_signal_json JSONB,
+                ADD COLUMN IF NOT EXISTS last_entry_block_reason TEXT,
+                ADD COLUMN IF NOT EXISTS execution_json JSONB,
+                ADD COLUMN IF NOT EXISTS heartbeat_json JSONB,
+                ADD COLUMN IF NOT EXISTS lifecycle_json JSONB;
+            """
+        )
+        cur.execute(
+            """
+            ALTER TABLE IF EXISTS events
+                ADD COLUMN IF NOT EXISTS contracts INTEGER,
+                ADD COLUMN IF NOT EXISTS order_status TEXT,
+                ADD COLUMN IF NOT EXISTS guard_reason TEXT,
+                ADD COLUMN IF NOT EXISTS decision_side TEXT,
+                ADD COLUMN IF NOT EXISTS decision_price DOUBLE PRECISION,
+                ADD COLUMN IF NOT EXISTS expected_fill_price DOUBLE PRECISION,
+                ADD COLUMN IF NOT EXISTS entry_guard_json JSONB,
+                ADD COLUMN IF NOT EXISTS unresolved_entry_json JSONB,
+                ADD COLUMN IF NOT EXISTS execution_json JSONB;
+            """
+        )
+        cur.execute(
+            """
+            ALTER TABLE IF EXISTS state_snapshots
+                ADD COLUMN IF NOT EXISTS status TEXT,
+                ADD COLUMN IF NOT EXISTS data_mode TEXT,
+                ADD COLUMN IF NOT EXISTS symbol TEXT,
+                ADD COLUMN IF NOT EXISTS zone TEXT,
+                ADD COLUMN IF NOT EXISTS zone_state TEXT,
+                ADD COLUMN IF NOT EXISTS position INTEGER,
+                ADD COLUMN IF NOT EXISTS position_pnl DOUBLE PRECISION,
+                ADD COLUMN IF NOT EXISTS daily_pnl DOUBLE PRECISION,
+                ADD COLUMN IF NOT EXISTS risk_state TEXT,
+                ADD COLUMN IF NOT EXISTS account_id TEXT,
+                ADD COLUMN IF NOT EXISTS account_name TEXT,
+                ADD COLUMN IF NOT EXISTS account_mode TEXT,
+                ADD COLUMN IF NOT EXISTS account_is_practice BOOLEAN,
+                ADD COLUMN IF NOT EXISTS last_signal_json JSONB,
+                ADD COLUMN IF NOT EXISTS last_entry_reason TEXT,
+                ADD COLUMN IF NOT EXISTS last_entry_block_reason TEXT,
+                ADD COLUMN IF NOT EXISTS decision_price DOUBLE PRECISION,
+                ADD COLUMN IF NOT EXISTS entry_guard_json JSONB,
+                ADD COLUMN IF NOT EXISTS unresolved_entry_json JSONB,
+                ADD COLUMN IF NOT EXISTS execution_json JSONB,
+                ADD COLUMN IF NOT EXISTS heartbeat_json JSONB,
+                ADD COLUMN IF NOT EXISTS lifecycle_json JSONB,
+                ADD COLUMN IF NOT EXISTS observability_json JSONB,
+                ADD COLUMN IF NOT EXISTS decision_id TEXT,
+                ADD COLUMN IF NOT EXISTS attempt_id TEXT,
+                ADD COLUMN IF NOT EXISTS position_id TEXT,
+                ADD COLUMN IF NOT EXISTS trade_id TEXT;
+            """
+        )
+        cur.execute(
+            """
+            ALTER TABLE IF EXISTS completed_trades
+                ADD COLUMN IF NOT EXISTS event_tags_json JSONB,
+                ADD COLUMN IF NOT EXISTS trade_id TEXT,
+                ADD COLUMN IF NOT EXISTS position_id TEXT,
+                ADD COLUMN IF NOT EXISTS decision_id TEXT,
+                ADD COLUMN IF NOT EXISTS attempt_id TEXT,
+                ADD COLUMN IF NOT EXISTS account_id TEXT,
+                ADD COLUMN IF NOT EXISTS account_name TEXT,
+                ADD COLUMN IF NOT EXISTS account_mode TEXT,
+                ADD COLUMN IF NOT EXISTS account_is_practice BOOLEAN;
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS run_manifests (
+                run_id TEXT PRIMARY KEY,
+                created_at TIMESTAMPTZ NOT NULL,
+                last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                process_id INT,
+                data_mode TEXT,
+                symbol TEXT,
+                account_id TEXT,
+                account_name TEXT,
+                account_mode TEXT,
+                account_is_practice BOOLEAN,
+                config_path TEXT,
+                config_hash TEXT,
+                log_path TEXT,
+                sqlite_path TEXT,
+                git_commit TEXT,
+                git_branch TEXT,
+                git_dirty BOOLEAN,
+                git_available BOOLEAN,
+                app_version TEXT,
+                payload_json JSONB NOT NULL
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS account_trades (
+                id BIGSERIAL PRIMARY KEY,
+                run_id TEXT,
+                inserted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                occurred_at TIMESTAMPTZ NOT NULL,
+                account_id TEXT NOT NULL,
+                account_name TEXT,
+                account_mode TEXT,
+                account_is_practice BOOLEAN,
+                broker_trade_id TEXT NOT NULL,
+                broker_order_id TEXT,
+                contract_id TEXT,
+                side INTEGER,
+                size INTEGER,
+                price DOUBLE PRECISION,
+                profit_and_loss DOUBLE PRECISION,
+                fees DOUBLE PRECISION,
+                voided BOOLEAN,
+                source TEXT NOT NULL DEFAULT 'ingest',
+                payload_json JSONB NOT NULL,
+                UNIQUE(account_id, broker_trade_id)
+            );
+            """
+        )
         with open(schema_path) as f:
-            conn.cursor().execute(f.read())
+            cur.execute(f.read())
         conn.commit()
     finally:
         put_conn(conn)

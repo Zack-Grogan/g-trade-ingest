@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import builtins
 from pathlib import Path
 import sys
+from io import StringIO
 
 from fastapi.testclient import TestClient
 
@@ -114,3 +116,20 @@ def test_account_trades_accept_internal_token(monkeypatch):
     assert response.json() == {"ok": True, "inserted": 1}
     assert fake_conn.committed is True
     assert any("INSERT INTO account_trades" in query for query, _ in fake_conn.cursor_obj.executed)
+
+
+def test_ensure_schema_bootstraps_account_awareness(monkeypatch):
+    fake_conn = _FakeConn()
+    monkeypatch.setattr(ingest_app.os.path, "exists", lambda _: True)
+    monkeypatch.setattr(ingest_app, "get_conn", lambda: fake_conn)
+    monkeypatch.setattr(ingest_app, "put_conn", lambda conn: None)
+    monkeypatch.setattr(builtins, "open", lambda *args, **kwargs: StringIO("SELECT 1;"))
+
+    ingest_app.ensure_schema()
+
+    executed = [query for query, _ in fake_conn.cursor_obj.executed]
+    assert any("ALTER TABLE IF EXISTS runs" in query for query in executed)
+    assert any("ALTER TABLE IF EXISTS completed_trades" in query for query in executed)
+    assert any("CREATE TABLE IF NOT EXISTS account_trades" in query for query in executed)
+    assert executed[-1] == "SELECT 1;"
+    assert fake_conn.committed is True
