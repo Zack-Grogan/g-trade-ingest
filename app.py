@@ -54,6 +54,31 @@ def _extract_run_id(body: dict[str, Any]) -> str:
     return str(body.get("run_id") or observability.get("run_id") or payload_json.get("run_id") or "unknown")
 
 
+def _extract_account_fields(body: dict[str, Any]) -> dict[str, Any]:
+    account = _as_mapping(body.get("account"))
+    account_id = body.get("account_id") or account.get("id") or account.get("account_id")
+    account_name = body.get("account_name") or account.get("name") or account.get("account_name")
+    account_is_practice = body.get("account_is_practice")
+    if account_is_practice is None:
+        account_is_practice = account.get("is_practice")
+    if account_is_practice is None:
+        account_is_practice = account.get("practice_account")
+    if account_is_practice is None:
+        account_is_practice = account.get("practice")
+    if account_is_practice is None:
+        account_is_practice = account.get("simulated")
+    if account_is_practice is None:
+        account_mode = body.get("account_mode") or account.get("account_mode")
+    else:
+        account_mode = "practice" if bool(account_is_practice) else "live"
+    return {
+        "account_id": str(account_id) if account_id not in {None, ""} else None,
+        "account_name": str(account_name) if account_name not in {None, ""} else None,
+        "account_mode": account_mode,
+        "account_is_practice": bool(account_is_practice) if account_is_practice is not None else None,
+    }
+
+
 def _extract_state_fields(body: dict[str, Any]) -> dict[str, Any]:
     zone = _as_mapping(body.get("zone"))
     position = _as_mapping(body.get("position"))
@@ -64,6 +89,7 @@ def _extract_state_fields(body: dict[str, Any]) -> dict[str, Any]:
     lifecycle = _as_mapping(body.get("lifecycle"))
     observability = _as_mapping(body.get("observability"))
     alpha = _as_mapping(body.get("alpha"))
+    account_fields = _extract_account_fields(body)
     symbols = observability.get("symbols")
     symbol = body.get("symbol")
     if symbol is None and isinstance(symbols, list) and symbols:
@@ -79,6 +105,10 @@ def _extract_state_fields(body: dict[str, Any]) -> dict[str, Any]:
         "position_pnl": position.get("pnl"),
         "daily_pnl": account.get("daily_pnl"),
         "risk_state": risk.get("state"),
+        "account_id": account_fields["account_id"],
+        "account_name": account_fields["account_name"],
+        "account_mode": account_fields["account_mode"],
+        "account_is_practice": account_fields["account_is_practice"],
         "last_signal_json": Json(body.get("last_signal")) if body.get("last_signal") is not None else None,
         "last_entry_reason": body.get("last_entry_reason") or alpha.get("last_entry_reason"),
         "last_entry_block_reason": execution.get("last_entry_block_reason") or body.get("last_entry_block_reason"),
@@ -111,12 +141,17 @@ def _extract_event_fields(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _extract_run_manifest_fields(body: dict[str, Any]) -> dict[str, Any]:
+    account_fields = _extract_account_fields(body)
     return {
         "run_id": _extract_run_id(body),
         "created_at": body.get("started_at") or body.get("created_at"),
         "process_id": body.get("process_id"),
         "data_mode": body.get("data_mode"),
         "symbol": (body.get("symbols") or [None])[0] if isinstance(body.get("symbols"), list) else body.get("symbol"),
+        "account_id": account_fields["account_id"],
+        "account_name": account_fields["account_name"],
+        "account_mode": account_fields["account_mode"],
+        "account_is_practice": account_fields["account_is_practice"],
         "config_path": body.get("config_path"),
         "config_hash": body.get("config_hash"),
         "log_path": body.get("log_path"),
@@ -180,11 +215,12 @@ async def ingest_state(
             """
             INSERT INTO state_snapshots (
                 run_id, captured_at, status, data_mode, symbol, zone, zone_state, position, position_pnl,
-                daily_pnl, risk_state, last_signal_json, last_entry_reason, last_entry_block_reason, decision_price,
+                daily_pnl, risk_state, account_id, account_name, account_mode, account_is_practice,
+                last_signal_json, last_entry_reason, last_entry_block_reason, decision_price,
                 decision_id, attempt_id, position_id, trade_id, entry_guard_json, unresolved_entry_json,
                 execution_json, heartbeat_json, lifecycle_json, observability_json, payload_json
             ) VALUES (
-                %s, NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                %s, NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
             )
             """,
             (
@@ -198,6 +234,10 @@ async def ingest_state(
                 state_fields["position_pnl"],
                 state_fields["daily_pnl"],
                 state_fields["risk_state"],
+                state_fields["account_id"],
+                state_fields["account_name"],
+                state_fields["account_mode"],
+                state_fields["account_is_practice"],
                 state_fields["last_signal_json"],
                 state_fields["last_entry_reason"],
                 state_fields["last_entry_block_reason"],
@@ -219,10 +259,11 @@ async def ingest_state(
             """
             INSERT INTO runs (
                 run_id, created_at, last_seen_at, process_id, data_mode, symbol, status, zone, zone_state, position,
-                position_pnl, daily_pnl, risk_state, last_signal_json, last_entry_block_reason, execution_json,
+                position_pnl, daily_pnl, risk_state, account_id, account_name, account_mode, account_is_practice,
+                last_signal_json, last_entry_block_reason, execution_json,
                 heartbeat_json, lifecycle_json, payload_json
             ) VALUES (
-                %s, NOW(), NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                %s, NOW(), NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
             )
             ON CONFLICT (run_id) DO UPDATE SET
                 last_seen_at = EXCLUDED.last_seen_at,
@@ -236,6 +277,10 @@ async def ingest_state(
                 position_pnl = EXCLUDED.position_pnl,
                 daily_pnl = EXCLUDED.daily_pnl,
                 risk_state = EXCLUDED.risk_state,
+                account_id = EXCLUDED.account_id,
+                account_name = EXCLUDED.account_name,
+                account_mode = EXCLUDED.account_mode,
+                account_is_practice = EXCLUDED.account_is_practice,
                 last_signal_json = EXCLUDED.last_signal_json,
                 last_entry_block_reason = EXCLUDED.last_entry_block_reason,
                 execution_json = EXCLUDED.execution_json,
@@ -255,6 +300,10 @@ async def ingest_state(
                 state_fields["position_pnl"],
                 state_fields["daily_pnl"],
                 state_fields["risk_state"],
+                state_fields["account_id"],
+                state_fields["account_name"],
+                state_fields["account_mode"],
+                state_fields["account_is_practice"],
                 state_fields["last_signal_json"],
                 state_fields["last_entry_block_reason"],
                 state_fields["execution_json"],
@@ -423,9 +472,10 @@ async def ingest_trades(
             cur.execute(
                 """INSERT INTO completed_trades (
                        run_id, entry_time, exit_time, direction, contracts, entry_price, exit_price, pnl, zone, strategy,
-                       regime, event_tags_json, source, backfilled, trade_id, position_id, decision_id, attempt_id, payload_json
+                       regime, event_tags_json, source, backfilled, trade_id, position_id, decision_id, attempt_id,
+                       account_id, account_name, account_mode, account_is_practice, payload_json
                    )
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                 (
                     row.get("run_id", ""),
                     row.get("entry_time"),
@@ -445,6 +495,10 @@ async def ingest_trades(
                     row.get("position_id"),
                     row.get("decision_id"),
                     row.get("attempt_id"),
+                    row.get("account_id"),
+                    row.get("account_name"),
+                    row.get("account_mode"),
+                    row.get("account_is_practice"),
                     Json(row),
                 ),
             )
@@ -452,6 +506,66 @@ async def ingest_trades(
     except Exception as e:
         conn.rollback()
         logger.exception("ingest_trades failed")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+    finally:
+        put_conn(conn)
+    return {"ok": True, "inserted": len(trades)}
+
+
+@app.post("/ingest/account-trades")
+async def ingest_account_trades(
+    request: Request,
+    authorization: str | None = Header(None),
+):
+    if not _bearer_ok(authorization):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing Bearer token")
+    body = await request.json()
+    if not isinstance(body, dict) or "account_trades" not in body:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="JSON object with 'account_trades' array required")
+    trades = list(body["account_trades"]) if isinstance(body.get("account_trades"), list) else []
+    if not trades:
+        return {"ok": True, "inserted": 0}
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        for trade in trades:
+            row = trade if isinstance(trade, dict) else {}
+            occurred_at = row.get("occurred_at") or row.get("creationTimestamp") or row.get("creation_timestamp") or row.get("timestamp")
+            cur.execute(
+                """INSERT INTO account_trades (
+                       run_id, inserted_at, occurred_at, account_id, account_name, account_mode, account_is_practice,
+                       broker_trade_id, broker_order_id, contract_id, side, size, price, profit_and_loss, fees,
+                       voided, source, payload_json
+                   )
+                   VALUES (
+                       %s, COALESCE(%s, NOW()), COALESCE(%s, NOW()), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                   )
+                   ON CONFLICT (account_id, broker_trade_id) DO NOTHING""",
+                (
+                    row.get("run_id"),
+                    row.get("inserted_at"),
+                    occurred_at,
+                    row.get("account_id") or row.get("accountId"),
+                    row.get("account_name"),
+                    row.get("account_mode"),
+                    row.get("account_is_practice"),
+                    row.get("broker_trade_id") or row.get("trade_id") or row.get("id"),
+                    row.get("broker_order_id") or row.get("orderId") or row.get("order_id"),
+                    row.get("contract_id") or row.get("contractId"),
+                    row.get("side"),
+                    row.get("size"),
+                    row.get("price"),
+                    row.get("profit_and_loss") if "profit_and_loss" in row else row.get("profitAndLoss"),
+                    row.get("fees"),
+                    row.get("voided"),
+                    row.get("source", "ingest"),
+                    Json(row),
+                ),
+            )
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        logger.exception("ingest_account_trades failed")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
     finally:
         put_conn(conn)
@@ -686,9 +800,10 @@ async def ingest_run_manifest(
             """
             INSERT INTO run_manifests (
                 run_id, created_at, last_seen_at, process_id, data_mode, symbol, config_path, config_hash,
+                account_id, account_name, account_mode, account_is_practice,
                 log_path, sqlite_path, git_commit, git_branch, git_dirty, git_available, app_version, payload_json
             ) VALUES (
-                %s, COALESCE(%s, NOW()), NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                %s, COALESCE(%s, NOW()), NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
             )
             ON CONFLICT (run_id) DO UPDATE SET
                 last_seen_at = EXCLUDED.last_seen_at,
@@ -697,6 +812,10 @@ async def ingest_run_manifest(
                 symbol = COALESCE(EXCLUDED.symbol, run_manifests.symbol),
                 config_path = EXCLUDED.config_path,
                 config_hash = EXCLUDED.config_hash,
+                account_id = EXCLUDED.account_id,
+                account_name = EXCLUDED.account_name,
+                account_mode = EXCLUDED.account_mode,
+                account_is_practice = EXCLUDED.account_is_practice,
                 log_path = EXCLUDED.log_path,
                 sqlite_path = EXCLUDED.sqlite_path,
                 git_commit = EXCLUDED.git_commit,
@@ -714,6 +833,10 @@ async def ingest_run_manifest(
                 fields["symbol"],
                 fields["config_path"],
                 fields["config_hash"],
+                fields["account_id"],
+                fields["account_name"],
+                fields["account_mode"],
+                fields["account_is_practice"],
                 fields["log_path"],
                 fields["sqlite_path"],
                 fields["git_commit"],
@@ -727,14 +850,19 @@ async def ingest_run_manifest(
         cur.execute(
             """
             INSERT INTO runs (
-                run_id, created_at, last_seen_at, process_id, data_mode, symbol, status, payload_json
-            ) VALUES (%s, COALESCE(%s, NOW()), NOW(), %s, %s, %s, %s, %s)
+                run_id, created_at, last_seen_at, process_id, data_mode, symbol, status,
+                account_id, account_name, account_mode, account_is_practice, payload_json
+            ) VALUES (%s, COALESCE(%s, NOW()), NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (run_id) DO UPDATE SET
                 last_seen_at = EXCLUDED.last_seen_at,
                 process_id = COALESCE(EXCLUDED.process_id, runs.process_id),
                 data_mode = EXCLUDED.data_mode,
                 symbol = COALESCE(EXCLUDED.symbol, runs.symbol),
                 status = EXCLUDED.status,
+                account_id = EXCLUDED.account_id,
+                account_name = EXCLUDED.account_name,
+                account_mode = EXCLUDED.account_mode,
+                account_is_practice = EXCLUDED.account_is_practice,
                 payload_json = EXCLUDED.payload_json
             """,
             (
@@ -744,6 +872,10 @@ async def ingest_run_manifest(
                 fields["data_mode"],
                 fields["symbol"],
                 body.get("status") or body.get("phase") or fields["data_mode"] or "manifest_received",
+                fields["account_id"],
+                fields["account_name"],
+                fields["account_mode"],
+                fields["account_is_practice"],
                 Json(body),
             ),
         )

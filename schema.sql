@@ -5,6 +5,10 @@ CREATE TABLE IF NOT EXISTS runs (
     process_id INT,
     data_mode TEXT,
     symbol TEXT,
+    account_id TEXT,
+    account_name TEXT,
+    account_mode TEXT,
+    account_is_practice BOOLEAN,
     payload_json JSONB
 );
 
@@ -182,6 +186,10 @@ ALTER TABLE IF EXISTS runs
     ADD COLUMN IF NOT EXISTS position_pnl DOUBLE PRECISION,
     ADD COLUMN IF NOT EXISTS daily_pnl DOUBLE PRECISION,
     ADD COLUMN IF NOT EXISTS risk_state TEXT,
+    ADD COLUMN IF NOT EXISTS account_id TEXT,
+    ADD COLUMN IF NOT EXISTS account_name TEXT,
+    ADD COLUMN IF NOT EXISTS account_mode TEXT,
+    ADD COLUMN IF NOT EXISTS account_is_practice BOOLEAN,
     ADD COLUMN IF NOT EXISTS last_signal_json JSONB,
     ADD COLUMN IF NOT EXISTS last_entry_block_reason TEXT,
     ADD COLUMN IF NOT EXISTS execution_json JSONB,
@@ -209,6 +217,10 @@ ALTER TABLE IF EXISTS state_snapshots
     ADD COLUMN IF NOT EXISTS position_pnl DOUBLE PRECISION,
     ADD COLUMN IF NOT EXISTS daily_pnl DOUBLE PRECISION,
     ADD COLUMN IF NOT EXISTS risk_state TEXT,
+    ADD COLUMN IF NOT EXISTS account_id TEXT,
+    ADD COLUMN IF NOT EXISTS account_name TEXT,
+    ADD COLUMN IF NOT EXISTS account_mode TEXT,
+    ADD COLUMN IF NOT EXISTS account_is_practice BOOLEAN,
     ADD COLUMN IF NOT EXISTS last_signal_json JSONB,
     ADD COLUMN IF NOT EXISTS last_entry_reason TEXT,
     ADD COLUMN IF NOT EXISTS last_entry_block_reason TEXT,
@@ -229,7 +241,13 @@ ALTER TABLE IF EXISTS completed_trades
     ADD COLUMN IF NOT EXISTS trade_id TEXT,
     ADD COLUMN IF NOT EXISTS position_id TEXT,
     ADD COLUMN IF NOT EXISTS decision_id TEXT,
-    ADD COLUMN IF NOT EXISTS attempt_id TEXT;
+    ADD COLUMN IF NOT EXISTS attempt_id TEXT,
+    ADD COLUMN IF NOT EXISTS account_id TEXT,
+    ADD COLUMN IF NOT EXISTS account_name TEXT,
+    ADD COLUMN IF NOT EXISTS account_mode TEXT,
+    ADD COLUMN IF NOT EXISTS account_is_practice BOOLEAN;
+
+CREATE INDEX IF NOT EXISTS idx_completed_trades_account_id ON completed_trades(account_id, exit_time DESC);
 
 CREATE TABLE IF NOT EXISTS run_manifests (
     run_id TEXT PRIMARY KEY,
@@ -238,6 +256,10 @@ CREATE TABLE IF NOT EXISTS run_manifests (
     process_id INT,
     data_mode TEXT,
     symbol TEXT,
+    account_id TEXT,
+    account_name TEXT,
+    account_mode TEXT,
+    account_is_practice BOOLEAN,
     config_path TEXT,
     config_hash TEXT,
     log_path TEXT,
@@ -253,6 +275,7 @@ CREATE TABLE IF NOT EXISTS run_manifests (
 CREATE INDEX IF NOT EXISTS idx_run_manifests_created_at ON run_manifests(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_run_manifests_last_seen_at ON run_manifests(last_seen_at DESC);
 CREATE INDEX IF NOT EXISTS idx_run_manifests_symbol ON run_manifests(symbol, last_seen_at DESC);
+CREATE INDEX IF NOT EXISTS idx_run_manifests_account_id ON run_manifests(account_id, last_seen_at DESC);
 
 CREATE TABLE IF NOT EXISTS bridge_ingest_health (
     id BIGSERIAL PRIMARY KEY,
@@ -287,3 +310,30 @@ CREATE TABLE IF NOT EXISTS runtime_logs (
 CREATE INDEX IF NOT EXISTS idx_runtime_logs_run_id ON runtime_logs(run_id, logged_at DESC);
 CREATE INDEX IF NOT EXISTS idx_runtime_logs_level ON runtime_logs(level, logged_at DESC);
 CREATE INDEX IF NOT EXISTS idx_runtime_logs_logged_at ON runtime_logs(logged_at DESC);
+
+CREATE TABLE IF NOT EXISTS account_trades (
+    id BIGSERIAL PRIMARY KEY,
+    run_id TEXT,
+    inserted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    occurred_at TIMESTAMPTZ NOT NULL,
+    account_id TEXT NOT NULL,
+    account_name TEXT,
+    account_mode TEXT,
+    account_is_practice BOOLEAN,
+    broker_trade_id TEXT NOT NULL,
+    broker_order_id TEXT,
+    contract_id TEXT,
+    side INTEGER,
+    size INTEGER,
+    price DOUBLE PRECISION,
+    profit_and_loss DOUBLE PRECISION,
+    fees DOUBLE PRECISION,
+    voided BOOLEAN,
+    source TEXT NOT NULL DEFAULT 'ingest',
+    payload_json JSONB NOT NULL,
+    UNIQUE(account_id, broker_trade_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_account_trades_account_id ON account_trades(account_id, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_account_trades_run_id ON account_trades(run_id, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_account_trades_occurred_at ON account_trades(occurred_at DESC);

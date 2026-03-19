@@ -79,3 +79,38 @@ def test_runtime_logs_reject_legacy_ingest_key(monkeypatch):
         )
 
     assert response.status_code == 401
+
+
+def test_account_trades_accept_internal_token(monkeypatch):
+    fake_conn = _FakeConn()
+    monkeypatch.setattr(ingest_app, "ensure_schema", lambda: None)
+    monkeypatch.setattr(ingest_app, "INTERNAL_API_TOKEN", "internal-token")
+    monkeypatch.setattr(ingest_app, "get_conn", lambda: fake_conn)
+    monkeypatch.setattr(ingest_app, "put_conn", lambda conn: None)
+
+    with TestClient(ingest_app.app) as client:
+        response = client.post(
+            "/ingest/account-trades",
+            headers={"Authorization": "Bearer internal-token"},
+            json={
+                "account_trades": [
+                    {
+                        "run_id": "run-1",
+                        "account_id": "203",
+                        "account_name": "Practice 50K",
+                        "account_mode": "practice",
+                        "account_is_practice": True,
+                        "broker_trade_id": "8604",
+                        "broker_order_id": "14328",
+                        "contract_id": "CON.F.US.EP.H25",
+                        "occurred_at": "2025-01-21T16:13:52.523293+00:00",
+                        "profit_and_loss": 50.0,
+                    }
+                ]
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "inserted": 1}
+    assert fake_conn.committed is True
+    assert any("INSERT INTO account_trades" in query for query, _ in fake_conn.cursor_obj.executed)
