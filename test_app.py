@@ -133,3 +133,21 @@ def test_ensure_schema_bootstraps_account_awareness(monkeypatch):
     assert any("CREATE TABLE IF NOT EXISTS account_trades" in query for query in executed)
     assert executed[-1] == "SELECT 1;"
     assert fake_conn.committed is True
+
+
+def test_ensure_schema_keeps_legacy_bootstrap_when_bulk_schema_fails(monkeypatch):
+    fake_conn = _FakeConn()
+    monkeypatch.setattr(ingest_app.os.path, "exists", lambda _: True)
+    monkeypatch.setattr(ingest_app, "get_conn", lambda: fake_conn)
+    monkeypatch.setattr(ingest_app, "put_conn", lambda conn: None)
+
+    def _failing_open(*args, **kwargs):
+        raise RuntimeError("bulk schema failed")
+
+    monkeypatch.setattr(builtins, "open", _failing_open)
+
+    ingest_app.ensure_schema()
+
+    executed = [query for query, _ in fake_conn.cursor_obj.executed]
+    assert any("ALTER TABLE IF EXISTS completed_trades" in query for query in executed)
+    assert fake_conn.committed is True

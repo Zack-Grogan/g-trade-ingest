@@ -309,9 +309,16 @@ def ensure_schema() -> None:
             );
             """
         )
-        with open(schema_path) as f:
-            cur.execute(f.read())
         conn.commit()
+        try:
+            with open(schema_path) as f:
+                cur.execute(f.read())
+            conn.commit()
+        except Exception:
+            # Keep the legacy bootstrap changes even if the bulk schema file
+            # still hits an idempotency mismatch on an old production DB.
+            logger.warning("Bulk schema apply failed after legacy bootstrap", exc_info=True)
+            conn.rollback()
     finally:
         put_conn(conn)
 
